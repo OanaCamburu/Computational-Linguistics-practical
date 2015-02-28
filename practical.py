@@ -68,12 +68,25 @@ brill_tags = [
 	]
 K = len(brill_tags)
 
-def parse_file(f):
-    all_POSes = []
+folds = 10 # for cross-validation. Don't change this!
+
+all_sentences = [''] * folds # treat each of the 10 files as a sentence. keeps track of the sentences in each file without pos-es
+previous_POSes = ['.'] # first time when we read a file begins with a new sentence, so it's as if we had a '.' before
+
+all_POSes = [0] * folds
+for i in range(folds):
+    all_POSes[i] = []
+
+parsed = [0] * folds # keeps track of the files parsed so that we don't overwrite the sentences and posses
+
+
+def parse_file(file_number):
+    global previous_POSes   
+    
     counts_probabilities = {}
     counts_transitions = {}
     counts_POS = {}
-
+    
     # add 1-smoothing initialization
     counts_POS["START"] = K
     for tag1 in brill_tags:
@@ -81,13 +94,16 @@ def parse_file(f):
         counts_transitions[("START", tag1)] = 1
         for tag2 in brill_tags:
             counts_transitions[(tag1, tag2)] = 1
-
-    previous_POSes = ['.'] # each file starts with a new sentence, so at the begining of a file we consider the previous POS was a '.'
+    
+    file_name = 'data/x0' + str(file_number) + '.POS'
+    print file_name
+    f = open(file_name, 'r')
+    
     for line in f:  # read each line from the input file
         if '.' in previous_POSes: # every sentence is ended by the POS '.'
             previous_POSes = ["START"]	# mark new sentence	 # REMARK: we could remove the "START" symbol and only use the "." but for purposes of clearness we keep the START symbol
         if line != "\n":  # that is not empty
-            tokens = line.split(" ")  # split by words with their annotation
+            tokens = line.split()  # split by words with their annotation
             for token in tokens:
                 if "/" in token:  # some tokens might not be word/POS, for example "[" or '===='
                     if "\/" in token: 
@@ -142,21 +158,24 @@ def parse_file(f):
                             counts_transitions[(previous_POS, current_POS)] += 1
                             counts_POS[previous_POS] += 1
                     previous_POSes = current_POSes[:]
+                    # Add word to all_sentences[file_number] with its associated posses if we haven't done that yet (we will pass through each file 10 times do to cross validation but we only need to parse the file once)
+                    if not parsed[file_number]:
+                        all_sentences[file_number] += ' ' + word
+                        all_POSes[file_number].append(current_POSes)
+    
+    parsed[file_number] = 1 # mark that we already parsed this file
+    return counts_probabilities, counts_transitions, counts_POS
 
-    return all_POSes, counts_probabilities, counts_transitions, counts_POS
 
 def computeWordProbabilitiesAndTransitions(exclude_file_number):
 
     category_probabilities = {}
     transitions_probabilities = {}
-    
-    for file_name in glob.glob('data/*'):
-        exclude_file_name = 'x0' + str(exclude_file_number)
-        if file_name != exclude_file_name:
-            f = open(file_name, 'r')
-            print file_name
-            all_POSes, counts_probabilities, counts_transitions, counts_POS = parse_file(f)
 
+    for file_number in range(10):
+        if file_number != exclude_file_number:
+            counts_probabilities, counts_transitions, counts_POS = parse_file(file_number)
+            
     print "All files parsed correctly and the POS tags are in Brill tags! :) "
     for word, pos in counts_probabilities.items():
         sum = 0;
@@ -172,13 +191,66 @@ def computeWordProbabilitiesAndTransitions(exclude_file_number):
 
     return category_probabilities, transitions_probabilities
 
-category_probabilities, transitions_probabilities = computeWordProbabilitiesAndTransitions('')
+def Viterbi_Log(sentence, category_probabilities, transitions_probabilities):
+    words = sentence.lower().split() # lower case because that's what we did when we indexed the words
+    print words[0:5]
+    N = len(words)
+    score = [[-float("inf") for x in range(N)] for x in range(K)]
+    back = [[0 for x in range(N)] for x in range(K)]
+
+    # Initialise
+    first_word = words[0]
+    for i in range(K):
+        tag = brill_tags[i]
+        if category_probabilities.has_key(first_word): 
+            if category_probabilities[first_word].has_key(tag):
+                score[i][0] = numpy.log(category_probabilities[first_word][tag] * transitions_probabilities[("START", tag)])
+        else: # unkown word
+            score[i][0] = numpy.log(1/float(K) * transitions_probabilities[("START", tag)])
+    
+    # Induction
+    for j in range(1, N):
+        word = words[j]
+        for i in range(K):
+            tag_i = brill_tags[i]
+            max_so_far = -float("inf")
+            arg_max = -1
+            for k in range(K):
+                tag_k = brill_tags[k]
+                val = score[k][j-1] + numpy.log(transitions_probabilities[(tag_k, tag_i)])
+                if category_probabilities.has_key(word):
+                    if category_probabilities[word].has_key(tag_i):
+                        val += numpy.log(category_probabilities[word][tag_i])
+                    else: # word have never had this pos
+                        val = -float("inf") # log(0)
+                else: # unknown word
+                    val += numpy.log(1/float(K))
+                if max_so_far < val:
+                    max_so_far = val
+                    arg_max = k
+            score[i][j] = max_so_far
+            back[i][j] = arg_max
+
+    # Back tracing the best tagging
+    t = [0] * N
+    max_so_far = -float('inf')
+    for i in range(K):
+        if max_so_far < score[i][N-1]:
+            max_so_far = score[i][N-1]
+            t[N-1] = i
+    for i in range(N-2, -1, -1):
+        t[i] = back[t[i+1]][i+1]
+    tags = ['a'] * N
+    for i in range(N):
+        tags[i] = brill_tags[t[i]]
+    return tags
 
 def Viterbi(sentence, category_probabilities, transitions_probabilities):
-    words = sentence.lower().split(" ") # lower case because that's what we did when we indexed the words
+    words = sentence.lower().split() # lower case because that's what we did when we indexed the words
     N = len(words)
     score = [[0 for x in range(N)] for x in range(K)]
     back = [[0 for x in range(N)] for x in range(K)]
+    
     # Initialise
     first_word = words[0]
     for i in range(K):
@@ -194,7 +266,7 @@ def Viterbi(sentence, category_probabilities, transitions_probabilities):
         word = words[j]
         for i in range(K):
             tag_i = brill_tags[i]
-            max_so_far = -1
+            max_so_far = -float("inf")
             arg_max = -1
             for k in range(K):
                 tag_k = brill_tags[k]
@@ -226,27 +298,64 @@ def Viterbi(sentence, category_probabilities, transitions_probabilities):
         tags[i] = brill_tags[t[i]]
     return tags
 
+
 # Uncomment for a more complex sentence
-# sentence = 'Once she did so , the big-souled German maestro with the shaky nerves who so often cancels offered a limpid , flowing performance that in its unswagged and unswaggering approach was totally at odds with the staging .'
+sentence = 'Once she did so , the big-souled German maestro with the shaky nerves who so often cancels offered a limpid , flowing performance that in its unswagged and unswaggering approach was totally at odds with the staging .'
 
-sentence = 'she is cool .'
-print(Viterbi(sentence, category_probabilities, transitions_probabilities))
+#sentence = 'she can go .'
+#print sentence
 
-def file_to_sentece(file_number):
-    sentence = ''
-    tags = []
-    f = open('x0' + str(file_number), 'r')
-    #for line in f:
+#sentence = "she is cool cool cool go there ."
 
+category_probabilities, transitions_probabilities = computeWordProbabilitiesAndTransitions('')
+predicted_tags = Viterbi(sentence, category_probabilities, transitions_probabilities)
+predicted_tags_log = Viterbi_Log(sentence, category_probabilities, transitions_probabilities)
+
+print sentence
+print predicted_tags
+print predicted_tags_log
+
+accuracy = [0] * folds
+counts = [0] * folds
 
 def cross_validation():
-    for file_number in range(10): # 10-fold cv
+    for file_number in range(folds): 
         category_probabilities, transitions_probabilities = computeWordProbabilitiesAndTransitions(file_number)
-            #sentence, tags = file_to_sentece(file_number)
-            #predicted_tags = Viterbi(sentence, category_probabilities, transitions_probabilities)
-            
+        predicted_tags = Viterbi_Log(all_sentences[file_number], category_probabilities, transitions_probabilities)
+        #print predicted_tags
+        # check predicted tags against the true values
+        for predicted_tag, true_tags in zip(predicted_tags, all_POSes[file_number]):
+            if predicted_tag in true_tags:
+                counts[file_number] += 1
+        accuracy[file_number] =  counts[file_number]/float(len(predicted_tags))
+        print '------'
+        g = open('sentence' + str(file_number), 'w')
+        g.write(all_sentences[file_number])
+        g.close()
+        g = open('prediction' + str(file_number), 'w')
+        g.write(str(predicted_tags))
+        g.close()
+        g = open('trueValues' + str(file_number), 'w')
+        g.write(str(all_POSes[file_number]))
+        g.close()
+        words = all_sentences[file_number].split()
+        print 'true tags'
+        print all_POSes[file_number][0:10]
+        print 'pred tags'
+        print predicted_tags[0:10]
+        print file_number
+        print len(words)
+        print len(predicted_tags)
+        print len(all_POSes[file_number])
+        print counts[file_number]
+        print accuracy[file_number]
+        print '------'
 
-
+cross_validation()
+print counts
+print '----'
+print accuracy
+print mean(accuracy)
 
 
 
